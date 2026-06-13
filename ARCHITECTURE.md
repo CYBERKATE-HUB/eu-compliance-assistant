@@ -14,6 +14,7 @@ legal context.
 ---
 
 ## Project structure
+```
 gdpr-assistant/
 ├── app/
 │   ├── core/
@@ -28,7 +29,7 @@ gdpr-assistant/
 ├── .env.example                # API key template
 ├── ARCHITECTURE.md
 └── requirements.txt
-
+```
 ---
 
 ## Source documents
