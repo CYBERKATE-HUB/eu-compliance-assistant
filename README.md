@@ -1,0 +1,59 @@
+# EU Compliance Assistant
+
+A bilingual RAG assistant for GDPR and EU AI Act compliance questions.
+Ask in English or French — get grounded answers with specific article citations.
+
+## What it does
+
+- Answers questions about GDPR and EU AI Act
+- Retrieves the most relevant articles from official EUR-Lex texts
+- Forces the LLM to answer only from retrieved context — no hallucination
+- Detects language automatically (EN/FR)
+- Includes an explain mode that shows every internal step
+
+## Architecture
+
+Hybrid retrieval (dense embeddings + BM25) merged with RRF →
+grounding prompt → Mistral large → answer with [Article X] citations.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for full technical documentation.
+
+## Stack
+
+| Component | Choice | Why |
+|-----------|--------|-----|
+| Embedding | all-MiniLM-L6-v2 | Fast, free, handles EN/FR |
+| Vector DB | ChromaDB | Local, zero infra, pure Python |
+| Sparse search | BM25 | Catches exact article references |
+| Merge | RRF k=60 | Scale-invariant rank fusion |
+| LLM | Mistral large | EU-hosted, strong on legal output |
+
+## Sources
+
+- GDPR (2016/679) — English + French
+- EU AI Act (2024/1689) — English + French
+- 424 article chunks total
+
+## Setup
+
+```bash
+python3.11 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env  # add your Mistral API key
+
+python app/core/parse_documents.py
+python app/core/embed_store.py
+
+python -m app.assistant   # ask questions
+python app/explain.py     # see internals
+```
+
+## Explain mode
+
+Run `python app/explain.py` and enter any question to see:
+- How the query is embedded (vector preview)
+- Dense retrieval scores and cosine similarity calculation
+- BM25 keyword scores
+- RRF merge calculation
+- Which articles are passed to Mistral as context
