@@ -1,0 +1,8 @@
+.env
+venv/
+data/gdpr_db/
+__pycache__/
+*.pyc
+.DS_Store
+data/all_chunks.json
+data/chunks.json
