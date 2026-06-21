@@ -43,8 +43,9 @@ def advanced_hybrid_retrieve(query: str, over_fetch_k=15, final_top_n=3, languag
     dense_res = collection.query(
         query_embeddings=[query_vector],
         n_results=over_fetch_k,
-        where=filter_dict
+        **({"where": filter_dict} if filter_dict else {})
     )
+    
     dense_ids = dense_res["ids"][0] if dense_res["ids"] else []
 
     # 2. Gather Sparse Candidates from BM25
