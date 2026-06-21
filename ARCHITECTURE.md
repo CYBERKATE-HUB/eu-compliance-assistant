@@ -1,155 +1,195 @@
-# GDPR + AI Act Compliance Assistant — Architecture
+# EU Compliance Platform — Architecture
 
-## What this system does
+## What this platform does
 
-A bilingual RAG assistant that answers questions about the GDPR and EU AI Act.
-The user asks a question in English or French. The system retrieves the most
-relevant articles from the official regulation texts, passes them to Mistral
-as grounded context, and returns an answer with specific article citations.
+Two connected tools for EU regulatory compliance:
 
-It does not use general LLM knowledge — every claim traces back to a retrieved
-article. This is a deliberate design choice to prevent hallucination in a
-legal context.
+**1. RAG Compliance Assistant** — answers questions about GDPR and EU AI Act in English and French. Retrieves relevant articles from official EUR-Lex texts, passes them to Mistral as grounded context, returns answers with specific article citations.
+
+**2. GDPR Support Agent** — takes a support ticket, classifies the issue, searches the knowledge base, retrieves similar past resolved tickets, and drafts a response for human review.
+
+Both tools share the same retrieval layer. No general LLM knowledge is used — every claim traces back to a retrieved article.
 
 ---
 
 ## Project structure
-```
-gdpr-assistant/
+eu-compliance-assistant/
+
 ├── app/
+
 │   ├── core/
+
 │   │   ├── parse_documents.py  # HTML → article chunks
+
 │   │   ├── embed_store.py      # chunks → vectors → ChromaDB
+
 │   │   └── retrieval.py        # hybrid search + direct article lookup
-│   ├── assistant.py            # CLI interface
-│   └── explain.py              # educational explainer (shows internals)
+
+│   ├── assistant.py            # RAG assistant CLI
+
+│   └── explain.py              # educational explainer
+
+├── support_agent/
+
+│   ├── tools.py                # three agent tools
+
+│   ├── agent.py                # ReAct loop + CLI
+
+│   ├── agent_explain.py        # agent educational explainer
+
+│   ├── seed_tickets.py         # sample resolved tickets
+
+│   └── seed_memory.py          # indexes tickets into ChromaDB
+
 ├── data/
-│   ├── all_chunks.json         # 424 parsed article chunks
+
 │   └── gdpr_db/                # ChromaDB vectors (not in git, rebuilds)
-├── .env.example                # API key template
+
+├── .env.example
+
 ├── ARCHITECTURE.md
+
 └── requirements.txt
-```
+
 ---
 
 ## Source documents
 
 | Document | Language | Articles |
-|----------|----------|---------|
+|----------|----------|----------|
 | GDPR (2016/679) | English | 99 |
 | GDPR (2016/679) | French | 95 |
 | AI Act (2024/1689) | English | 113 |
 | AI Act (2024/1689) | French | 117 |
 | **Total** | | **424 chunks** |
 
-Source: EUR-Lex official HTML versions. HTML chosen over PDF because
-it has semantic structure (headings, article tags) that makes
-article-boundary parsing reliable.
+Source: EUR-Lex official HTML versions. HTML chosen over PDF because it has semantic structure that makes article-boundary parsing reliable.
 
 ---
 
-## Chunking strategy
+## Shared retrieval layer
 
-Each article is one chunk. Metadata stored per chunk:
-`article_number`, `article_title`, `source` (gdpr/ai_act), `language` (en/fr).
+Both tools use the same retrieval pipeline from `app/core/retrieval.py`.
 
-**Why article-boundary chunking:**
-GDPR and AI Act have natural legal divisions — each article is a
-complete, self-contained unit of law. Splitting mid-article breaks
-legal conditions and context. Sliding windows would duplicate text
-across chunks and dilute retrieval precision.
+### Chunking strategy
 
----
+Each article is one chunk. Metadata per chunk: `article_number`, `article_title`, `source` (gdpr/ai_act), `language` (en/fr).
 
-## Retrieval pipeline
+**Why article-boundary chunking:** GDPR and AI Act have natural legal divisions — each article is a complete, self-contained unit of law. Splitting mid-article breaks legal conditions. Sliding windows duplicate content and dilute retrieval precision.
 
-### Stage 1 — Hybrid search (dense + sparse)
-
-Two parallel search methods run on every query:
+### Hybrid search (dense + sparse)
 
 **Dense search (ChromaDB + HNSW):**
-- Query is embedded with `all-MiniLM-L6-v2` (384 dimensions)
-- ChromaDB finds nearest vectors by cosine similarity
-- Good for semantic queries: "can I ask a company to forget me" → finds Article 17
+- Query embedded with `all-MiniLM-L6-v2` (384 dimensions)
+- Finds nearest vectors by cosine similarity
+- Good for semantic queries: "can I ask a company to forget me" → Article 17
 
 **Sparse search (BM25):**
-- Keyword frequency scoring across raw article text
+- Keyword frequency scoring across raw text
 - Good for exact legal strings: "Article 17", "data controller"
-- Dense search alone misses these because embeddings treat them as generic tokens
+- Dense search alone misses these — embeddings treat them as generic tokens
 
-**Why all-MiniLM-L6-v2:**
-Fast, free, 384 dimensions, handles English/French mixed text well.
-Good quality for a portfolio demo without requiring GPU inference.
+**Why all-MiniLM-L6-v2:** Fast, free, 384 dimensions, handles EN/FR mixed text. No GPU required.
 
-**Why ChromaDB:**
-Runs locally with zero infrastructure. Pure Python. Sufficient for
-424 chunks. For production at scale: Qdrant self-hosted.
+**Why ChromaDB:** Runs locally, zero infrastructure, pure Python. For production: Qdrant self-hosted.
 
-### Stage 2 — Reciprocal Rank Fusion (RRF)
+### Reciprocal Rank Fusion (RRF)
 
-Dense and sparse results are merged by rank position, not raw score.
-This avoids the scaling problem of comparing cosine distances (0–1)
-with BM25 frequencies (0–∞).
+Dense and sparse results merged by rank position, not raw score. Avoids the scaling problem of comparing cosine distances (0–1) with BM25 frequencies (0–∞).
 score(doc) = Σ 1 / (k + rank)    k = 60
 
-k=60 is the standard default — it dampens the effect of rank-1,
-reducing the impact of outliers. A document appearing in both lists
-gets two contributions and naturally ranks higher.
+k=60 dampens the effect of rank-1, reducing outlier impact. A document appearing in both lists gets two contributions and ranks higher.
 
 ### Direct article lookup
 
-If the query contains "Article X", the system bypasses semantic search
-and fetches that article directly via `get_article_by_number()`.
-This solves a known failure mode where BM25 treats "article" and "17"
-as separate high-frequency tokens across all 424 chunks.
+If query contains "Article X", system bypasses semantic search and fetches that article directly. Solves the failure mode where BM25 treats "article" and "17" as separate high-frequency tokens across all 424 chunks.
 
 ### Language detection
 
-French queries are detected by checking for common French function words
-(les, des, est, sont, pour, dans…). The system then filters retrieval
-to French-language chunks only, keeping IDF scores clean.
+French queries detected by checking common French function words. System filters retrieval to French-language chunks only, keeping IDF scores clean.
 
 ---
 
-## Hallucination mitigation — three layers
+## RAG Compliance Assistant
 
-1. **Confidence threshold:** top retrieval cosine score checked before
-   calling Mistral. If below 0.4, return a fallback message — never
-   generate with weak context.
+### Hallucination mitigation — three layers
 
-2. **Grounding prompt:** system prompt explicitly forbids outside
-   knowledge: "Answer ONLY using the provided context articles."
+1. **Confidence threshold:** top retrieval cosine score checked before calling Mistral. Below 0.4 → return fallback, never generate with weak context.
+2. **Grounding prompt:** "Answer ONLY using the provided context articles."
+3. **Citation requirement:** every factual claim must reference [Article X].
 
-3. **Citation requirement:** every factual claim must reference
-   [Article X]. If the model cannot cite it, it should not say it.
+### Known failure modes
 
----
+**Long articles lose granularity:** Article 4 (GDPR Definitions) has 26 definitions in one chunk. Sub-article chunking would improve precision. Not in v1.
 
-## Known failure modes
+**No conversation memory:** each question is independent. Next iteration: add message history to the API call.
 
-**Article number queries are imprecise without direct lookup:**
-BM25 treats "Article" and "17" as separate tokens appearing in all
-424 chunks, diluting the score. Solved by `get_article_by_number()`
-for explicit article references.
-
-**Long articles lose granularity:**
-Article 4 (GDPR Definitions) contains 26 definitions in one chunk.
-Sub-article chunking would improve precision for definition queries.
-Not implemented in v1.
-
-**No conversation memory:**
-Each question is independent — no message history passed to Mistral.
-Next iteration: add conversation history to the API call.
-
-**Reranker not implemented:**
-A cross-encoder reranker (BAAI/bge-reranker-base) would re-score
-candidates by reading query + document together. More accurate than
-embedding distance alone, ~150ms latency cost. Kept out of v1 to
-stay focused on core architecture.
+**Reranker not implemented:** cross-encoder (BAAI/bge-reranker-base) would re-score candidates by reading query + document together. ~150ms latency cost. Kept out of v1.
 
 ---
 
-## What would change for production at 10,000 users
+## GDPR Support Agent
+
+### Architecture pattern: ReAct
+
+Unlike the RAG assistant (fixed pipeline), the agent uses ReAct — Reason + Act:
+User ticket
+
+↓
+
+Mistral reasons → calls classify_ticket
+
+↓
+
+Mistral sees result → calls search_gdpr_kb
+
+↓
+
+Mistral sees articles → calls get_similar_resolved_tickets (optional)
+
+↓
+
+Mistral decides: enough context → writes DRAFT
+
+↓
+
+Human review
+
+Mistral decides the tool sequence — not hardcoded steps.
+
+### Three tools
+
+| Tool | Does | Why separate |
+|------|------|-------------|
+| `classify_ticket` | Categorises issue type and urgency via Mistral JSON output | Wrong category = wrong search query = wrong articles |
+| `search_gdpr_kb` | Retrieves relevant articles — reuses shared retrieval layer | Separation of concerns: classification ≠ retrieval |
+| `get_similar_resolved_tickets` | Finds past resolved tickets by semantic similarity | Memory improves draft quality with proven solutions |
+
+### Why classify before searching?
+
+A vague query "employee wants data deleted" returns Article 70 (Tasks of the Board). A classified query with subcategory `right_to_erasure` maps via `GDPR_QUERY_MAP` to "right to erasure data subject request Article 17" — returns Article 17 correctly.
+
+Classification is query enrichment, not just labelling.
+
+### Agent memory
+
+Past resolved tickets stored as separate ChromaDB collection (`resolved_tickets`). Same embedding model as the knowledge base — semantic similarity search across ticket descriptions. 5 seed tickets for demo. In production: auto-indexed from resolved ticket queue.
+
+### Hallucination mitigation
+
+Same three layers as the RAG assistant, plus:
+- All output marked **DRAFT** — never sent to customer directly
+- Human review gate before any response goes out
+
+### Known failure modes
+
+**Tool loop:** agent called `search_gdpr_kb` 4 times on ambiguous tickets. Fix: explicit instruction in system prompt — maximum 2 searches per ticket.
+
+**Rate limiting:** Mistral API returns 429 on rapid sequential calls. Fix in demo: `time.sleep(4)`. Fix in production: exponential backoff with jitter.
+
+---
+
+## Production considerations
 
 | Component | Current (demo) | Production |
 |-----------|---------------|------------|
@@ -157,32 +197,36 @@ stay focused on core architecture.
 | LLM | mistral-large-latest | mistral-large with rate limiting + caching |
 | Reranker | not implemented | bge-reranker-base, async batching |
 | Language detection | keyword list | fasttext classifier |
-| API | CLI only | FastAPI with auth + rate limits |
-| Evaluation | manual testing | RAGAS: faithfulness + context recall |
-| Hosting | local | EU-hosted (GDPR compliance for the tool itself) |
+| Agent rate limiting | time.sleep(4) | Exponential backoff + request queue |
+| Human review | printed DRAFT | Ticketing system (Zendesk, Jira) |
+| Monitoring | print statements | LLM observability (Langfuse, Helicone) |
+| Evaluation | manual | RAGAS: faithfulness + context recall |
+| Hosting | local | EU-hosted (GDPR compliant) |
 
 ---
 
 ## How to run
 
 ```bash
-# 1. Setup
+# Setup
 python3.11 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env  # add your Mistral API key
+cp .env.example .env  # add Mistral API key
 
-# 2. Parse documents (run once)
+# Build knowledge base (run once)
 python app/core/parse_documents.py
-
-# 3. Build vector index (run once)
 python app/core/embed_store.py
 
-# 4. Ask questions
-python -m app.assistant
+# Build agent memory (run once)
+python -m support_agent.seed_memory
 
-# 5. See internals
-python app/explain.py
+# RAG Assistant
+python -m app.assistant        # ask questions
+python app/explain.py          # see retrieval internals
+
+# Support Agent
+python -m support_agent.agent          # process tickets
+python -m support_agent.agent_explain  # see agent internals
 ```
-
 ---
